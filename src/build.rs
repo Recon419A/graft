@@ -16,13 +16,20 @@ impl std::fmt::Display for BuildError {
     }
 }
 
+/// Metadata about what a build produced, beyond just binaries.
+#[derive(Debug, Default)]
+pub struct BuildResult {
+    pub binaries: Vec<PathBuf>,
+    pub is_python_project: bool,
+    pub python_modules: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum BuildSystem {
     Cargo,
     Meson,
     CMake,
     Make,
-    // TODO: Python (setup.py / pyproject.toml), autotools, etc.
 }
 
 impl std::fmt::Display for BuildSystem {
@@ -107,17 +114,76 @@ pub fn detect_build_system(source_dir: &Path) -> Result<BuildSystem, String> {
     }
 }
 
+/// Check if the source tree is a Python project (has requirements.txt or Python sources).
+pub fn is_python_project(source_dir: &Path) -> bool {
+    source_dir.join("requirements.txt").exists()
+        || source_dir.join("setup.py").exists()
+        || source_dir.join("pyproject.toml").exists()
+}
+
 pub fn run_build(
     build_system: &BuildSystem,
     source_dir: &Path,
     repo: &str,
-) -> Result<Vec<PathBuf>, BuildError> {
-    match build_system {
-        BuildSystem::Cargo => build_cargo(source_dir, repo),
-        BuildSystem::Meson => build_meson(source_dir, repo),
-        BuildSystem::CMake => build_cmake(source_dir, repo),
-        BuildSystem::Make => build_make(source_dir, repo),
+    venv_path: Option<&Path>,
+) -> Result<BuildResult, BuildError> {
+    // Install Python dependencies before building, if a venv is provided.
+    if let Some(venv) = venv_path {
+        install_python_deps(source_dir, venv)?;
     }
+
+    let binaries = match build_system {
+        BuildSystem::Cargo => build_cargo(source_dir, repo)?,
+        BuildSystem::Meson => return build_meson(source_dir, repo, venv_path),
+        BuildSystem::CMake => build_cmake(source_dir, repo)?,
+        BuildSystem::Make => build_make(source_dir, repo)?,
+    };
+
+    Ok(BuildResult {
+        binaries,
+        is_python_project: venv_path.is_some(),
+        python_modules: Vec::new(),
+    })
+}
+
+fn install_python_deps(source_dir: &Path, venv_path: &Path) -> Result<(), BuildError> {
+    let requirements = source_dir.join("requirements.txt");
+    if !requirements.exists() {
+        return Ok(());
+    }
+
+    eprintln!("==> Installing Python dependencies into shared venv...");
+
+    let venv_python = venv_path.join("bin").join("python3");
+
+    // Try uv first, fall back to the venv's pip.
+    let venv_pip = venv_path.join("bin").join("pip");
+
+    let mut cmd = if which_exists("uv") {
+        let mut c = Command::new("uv");
+        c.args(["pip", "install", "--python"]);
+        c.arg(&venv_python);
+        c.arg("-r");
+        c
+    } else {
+        let mut c = Command::new(&venv_pip);
+        c.args(["install", "-r"]);
+        c
+    };
+
+    cmd.arg(&requirements);
+    cmd.current_dir(source_dir);
+
+    run_cmd(&mut cmd, "install Python dependencies")?;
+
+    Ok(())
+}
+
+fn which_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 struct CmdOutput {
@@ -234,27 +300,107 @@ fn build_cargo(source_dir: &Path, _repo: &str) -> Result<Vec<PathBuf>, BuildErro
         .map_err(|e| BuildError { message: e, missing_deps: Vec::new() })
 }
 
-fn build_meson(source_dir: &Path, _repo: &str) -> Result<Vec<PathBuf>, BuildError> {
+fn build_meson(
+    source_dir: &Path,
+    repo: &str,
+    venv_path: Option<&Path>,
+) -> Result<BuildResult, BuildError> {
     let build_dir = source_dir.join("builddir");
 
-    run_cmd(
-        Command::new("meson")
-            .arg("setup")
-            .arg(&build_dir)
-            .arg(source_dir)
-            .current_dir(source_dir),
-        "meson setup",
-    )?;
+    let mut setup_cmd = Command::new("meson");
+    setup_cmd
+        .arg("setup")
+        .arg(&build_dir)
+        .arg(source_dir)
+        .current_dir(source_dir);
 
-    run_cmd(
-        Command::new("meson")
-            .arg("compile")
-            .arg("-C")
-            .arg(&build_dir),
-        "meson compile",
-    )?;
+    // If we have a venv, tell meson to use it as prefix and make its Python visible.
+    if let Some(venv) = venv_path {
+        let venv_bin = venv.join("bin");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{current_path}", venv_bin.display());
 
-    // Meson install to a staging directory so we can pick out binaries.
+        setup_cmd
+            .arg(format!("--prefix={}", venv.display()))
+            .env("VIRTUAL_ENV", venv)
+            .env("PATH", &new_path);
+    }
+
+    run_cmd(&mut setup_cmd, "meson setup")?;
+
+    let mut compile_cmd = Command::new("meson");
+    compile_cmd.arg("compile").arg("-C").arg(&build_dir);
+    run_cmd(&mut compile_cmd, "meson compile")?;
+
+    // If we have a venv, install directly into it (no staging).
+    if let Some(venv) = venv_path {
+        let venv_bin = venv.join("bin");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{current_path}", venv_bin.display());
+
+        // Snapshot the venv bin/ mtimes before meson install so we can diff.
+        let before: std::collections::HashMap<String, std::time::SystemTime> =
+            fs::read_dir(&venv_bin)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            let mtime = e.metadata().ok()?.modified().ok()?;
+                            Some((name, mtime))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+        let mut install_cmd = Command::new("meson");
+        install_cmd.arg("install").arg("-C").arg(&build_dir);
+        install_cmd
+            .env("VIRTUAL_ENV", venv)
+            .env("PATH", &new_path);
+
+        run_cmd(&mut install_cmd, "meson install")?;
+
+        // Find files that are new or modified since our snapshot.
+        let binaries: Vec<PathBuf> = fs::read_dir(&venv_bin)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        if !e.path().is_file() {
+                            return false;
+                        }
+                        let name = e.file_name().to_string_lossy().to_string();
+                        let current_mtime = e.metadata().ok().and_then(|m| m.modified().ok());
+                        match (before.get(&name), current_mtime) {
+                            (None, _) => true,            // new file
+                            (Some(old), Some(new)) => new > *old,  // modified
+                            _ => false,
+                        }
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        eprintln!("==> Meson installed {} file(s) to bin/", binaries.len());
+        for b in &binaries {
+            if let Some(name) = b.file_name() {
+                eprintln!("    {}", name.to_string_lossy());
+            }
+        }
+
+        // Detect which Python modules were installed into the venv's site-packages.
+        let python_modules = find_installed_python_modules(venv, repo);
+
+        return Ok(BuildResult {
+            binaries,
+            is_python_project: true,
+            python_modules,
+        });
+    }
+
+    // No venv: stage to a temp dir and pick out binaries (original behavior).
     let staging = source_dir.join("_graft_staging");
     fs::create_dir_all(&staging)
         .map_err(|e| BuildError { message: format!("Failed to create staging dir: {e}"), missing_deps: Vec::new() })?;
@@ -269,8 +415,59 @@ fn build_meson(source_dir: &Path, _repo: &str) -> Result<Vec<PathBuf>, BuildErro
         "meson install",
     )?;
 
-    find_built_binaries_recursive(&staging)
-        .map_err(|e| BuildError { message: e, missing_deps: Vec::new() })
+    let binaries = find_built_binaries_recursive(&staging)
+        .map_err(|e| BuildError { message: e, missing_deps: Vec::new() })?;
+
+    Ok(BuildResult {
+        binaries,
+        is_python_project: false,
+        python_modules: Vec::new(),
+    })
+}
+
+/// Scan the venv's site-packages for directories matching the repo name.
+fn find_installed_python_modules(venv_path: &Path, repo: &str) -> Vec<String> {
+    let lib_dir = venv_path.join("lib");
+    let Ok(entries) = fs::read_dir(&lib_dir) else {
+        return Vec::new();
+    };
+
+    let mut modules = Vec::new();
+    // Normalize: cozy, com.github.geigi.cozy, etc.
+    let repo_lower = repo.to_lowercase();
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let site_packages = entry.path().join("site-packages");
+        if !site_packages.exists() {
+            continue;
+        }
+
+        let Ok(sp_entries) = fs::read_dir(&site_packages) else {
+            continue;
+        };
+
+        for sp_entry in sp_entries.filter_map(|e| e.ok()) {
+            if !sp_entry.path().is_dir() {
+                continue;
+            }
+            let name = sp_entry.file_name().to_string_lossy().to_string();
+            // Skip standard venv/pip internals.
+            if name.starts_with('_') || name == "pip" || name == "pkg_resources"
+                || name.ends_with(".dist-info") || name.ends_with(".egg-info")
+            {
+                continue;
+            }
+            // Match the repo name (or a reasonable variant).
+            if name.to_lowercase() == repo_lower
+                || name.to_lowercase() == repo_lower.replace('-', "_")
+                || name.to_lowercase().contains(&repo_lower)
+            {
+                modules.push(name);
+            }
+        }
+    }
+
+    modules
 }
 
 fn build_cmake(source_dir: &Path, _repo: &str) -> Result<Vec<PathBuf>, BuildError> {
@@ -405,21 +602,33 @@ pub fn pick_binary<'a>(binaries: &'a [PathBuf], repo: &str) -> Result<&'a PathBu
         return Err("Build produced no binaries".to_string());
     }
 
+    let get_name = |b: &&PathBuf| -> Option<String> {
+        b.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+    };
+
     // Exact repo name match.
-    if let Some(b) = binaries.iter().find(|b| {
-        b.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == repo)
-    }) {
+    if let Some(b) = binaries.iter().find(|b| get_name(b).is_some_and(|n| n == repo)) {
         return Ok(b);
     }
 
     // Repo name with hyphens replaced by underscores (common in Cargo).
     let alt_name = repo.replace('-', "_");
+    if let Some(b) = binaries.iter().find(|b| get_name(b).is_some_and(|n| n == alt_name)) {
+        return Ok(b);
+    }
+
+    // Match dotted names like "com.github.geigi.cozy" — check if the last segment matches repo.
     if let Some(b) = binaries.iter().find(|b| {
-        b.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == alt_name)
+        get_name(b).is_some_and(|n| {
+            n.rsplit('.').next().is_some_and(|last| last.eq_ignore_ascii_case(repo))
+        })
+    }) {
+        return Ok(b);
+    }
+
+    // Match if the binary name contains the repo name.
+    if let Some(b) = binaries.iter().find(|b| {
+        get_name(b).is_some_and(|n| n.to_lowercase().contains(&repo.to_lowercase()))
     }) {
         return Ok(b);
     }

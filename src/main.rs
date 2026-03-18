@@ -88,7 +88,7 @@ fn run_install(package: &str, install_deps: bool) -> Result<(), String> {
             let data = github::download_asset(asset)?;
             eprintln!("==> Installing...");
             install::install(&repo, &asset.name, &data)?;
-            install::save_manifest(&owner, &repo, &release.tag_name, &repo)?;
+            install::save_manifest(&owner, &repo, &release.tag_name, &repo, false, Vec::new())?;
             eprintln!("==> Installed {repo} ({})", release.tag_name);
         }
         Err(_) => {
@@ -116,21 +116,33 @@ fn build_from_source(
     let build_system = build::detect_build_system(&source_dir)?;
     eprintln!("==> Detected build system: {build_system}");
 
+    // Set up Python venv if this is a Python project.
+    let venv_path = if build::is_python_project(&source_dir) {
+        eprintln!("==> Detected Python project");
+        Some(install::ensure_python_venv()?)
+    } else {
+        None
+    };
+
     eprintln!("==> Building...");
-    let binaries = match build::run_build(&build_system, &source_dir, repo) {
-        Ok(bins) => bins,
+    let result = match build::run_build(
+        &build_system,
+        &source_dir,
+        repo,
+        venv_path.as_deref(),
+    ) {
+        Ok(result) => result,
         Err(build_err) => {
             if build_err.missing_deps.is_empty() {
                 return Err(build_err.message);
             }
             return handle_missing_deps(&build_err, install_deps, || {
-                // Retry the build after installing deps.
-                build_from_source(owner, repo, tag, false)
+                build_from_source(owner, repo, tag, install_deps)
             });
         }
     };
 
-    let binary = build::pick_binary(&binaries, repo)
+    let binary = build::pick_binary(&result.binaries, repo)
         .map_err(|e| e.to_string())?;
     let binary_name = binary
         .file_name()
@@ -138,16 +150,31 @@ fn build_from_source(
         .unwrap_or(repo);
     eprintln!("==> Found binary: {binary_name}");
 
-    let bin_dir = install::bin_dir()?;
-    let dest = bin_dir.join(binary_name);
-    std::fs::copy(binary, &dest).map_err(|e| format!("Failed to copy binary: {e}"))?;
+    // For Python projects, install a wrapper script instead of copying the binary.
+    if result.is_python_project {
+        let venv = venv_path.as_ref().unwrap();
+        install::install_python_wrapper(binary_name, venv)?;
+        install::save_manifest(
+            owner,
+            repo,
+            tag,
+            binary_name,
+            true,
+            result.python_modules,
+        )?;
+        eprintln!("==> Installed {repo} ({tag}) [built from source, Python venv]");
+    } else {
+        let bin_dir = install::bin_dir()?;
+        let dest = bin_dir.join(binary_name);
+        std::fs::copy(binary, &dest).map_err(|e| format!("Failed to copy binary: {e}"))?;
 
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("Failed to set permissions: {e}"))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Failed to set permissions: {e}"))?;
 
-    install::save_manifest(owner, repo, tag, binary_name)?;
-    eprintln!("==> Installed {repo} ({tag}) [built from source]");
+        install::save_manifest(owner, repo, tag, binary_name, false, Vec::new())?;
+        eprintln!("==> Installed {repo} ({tag}) [built from source]");
+    }
 
     Ok(())
 }
@@ -225,8 +252,7 @@ where
 
     let (cmd_name, args) = pm.install_cmd();
 
-    // Use sudo if we're not root and the package manager needs it.
-    let need_sudo = !is_root() && !matches!(pm, system::PackageManager::Portage);
+    let need_sudo = !is_root();
 
     let mut cmd = if need_sudo {
         let mut c = Command::new("sudo");
@@ -305,8 +331,13 @@ fn run_list() -> Result<(), String> {
             } else {
                 "missing"
             };
+            let extra = if manifest.python_env.unwrap_or(false) {
+                " [python]"
+            } else {
+                ""
+            };
             println!(
-                "{}/{} {} [{}] ({})",
+                "{}/{} {} [{}] ({}){extra}",
                 manifest.owner, manifest.repo, manifest.version, status, manifest.binary
             );
         }

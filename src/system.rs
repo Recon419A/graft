@@ -50,10 +50,8 @@ impl PackageManager {
     /// Format a human-readable install command for the given packages.
     pub fn install_hint(&self, packages: &[String]) -> String {
         let (cmd, args) = self.install_cmd();
-        let needs_root = !matches!(self, PackageManager::Portage);
-        let sudo = if needs_root { "sudo " } else { "" };
         format!(
-            "{sudo}{cmd} {} {}",
+            "sudo {cmd} {} {}",
             args.join(" "),
             packages.join(" ")
         )

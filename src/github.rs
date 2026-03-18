@@ -1,6 +1,37 @@
 use serde::Deserialize;
+use std::process::Command;
 
 use crate::platform::Target;
+
+fn gh_token() -> Option<String> {
+    Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+fn api_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
+fn api_get(client: &reqwest::blocking::Client, url: &str) -> Result<reqwest::blocking::Response, String> {
+    let mut req = client
+        .get(url)
+        .header("User-Agent", "graft-pm")
+        .header("Accept", "application/vnd.github+json");
+
+    if let Some(token) = gh_token() {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    req.send().map_err(|e| format!("Request failed: {e}"))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Release {
@@ -20,16 +51,11 @@ struct Tag {
 }
 
 pub fn latest_release(owner: &str, repo: &str) -> Result<Release, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = api_client();
 
     // Try the releases API first.
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "graft-pm")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .map_err(|e| format!("Failed to fetch release: {e}"))?;
+    let resp = api_get(&client, &url)?;
 
     if resp.status().is_success() {
         return resp
@@ -39,12 +65,7 @@ pub fn latest_release(owner: &str, repo: &str) -> Result<Release, String> {
 
     // Fall back to tags API — the repo may have tags but no formal releases.
     let tags_url = format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=1");
-    let resp = client
-        .get(&tags_url)
-        .header("User-Agent", "graft-pm")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .map_err(|e| format!("Failed to fetch tags: {e}"))?;
+    let resp = api_get(&client, &tags_url)?;
 
     if !resp.status().is_success() {
         return Err(format!("No releases or tags found for {owner}/{repo}"));
@@ -128,12 +149,8 @@ pub fn pick_asset<'a>(release: &'a Release, target: &Target) -> Result<&'a Asset
 }
 
 pub fn download_asset(asset: &Asset) -> Result<Vec<u8>, String> {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(&asset.browser_download_url)
-        .header("User-Agent", "graft-pm")
-        .send()
-        .map_err(|e| format!("Failed to download asset: {e}"))?;
+    let client = api_client();
+    let resp = api_get(&client, &asset.browser_download_url)?;
 
     if !resp.status().is_success() {
         return Err(format!("Download failed: {}", resp.status()));
