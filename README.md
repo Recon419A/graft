@@ -1,14 +1,14 @@
 # graft
 
-**Trust maintainers.** Install software from GitHub with one command.
+**Trust maintainers.** Install software directly from GitHub.
 
 ```
 graft sharkdp/bat
 ```
 
-That's it. graft finds the latest GitHub release, picks the right binary for your platform, and installs it to `~/.graft/bin/`.
+graft finds the latest release, picks the right binary for your platform, and installs it. No formulas. No recipes. No middleman between you and the maintainer.
 
-If there's no pre-built binary, graft downloads the source and builds it.
+If there's no pre-built binary, graft downloads the source and builds it. If the build needs system libraries, graft tells you exactly which ones — or installs them for you.
 
 ## Install
 
@@ -16,82 +16,105 @@ If there's no pre-built binary, graft downloads the source and builds it.
 cargo install rectifier
 ```
 
-The crate is called `rectifier` because `graft` was taken on crates.io. The binary is still `graft`.
-
-Add `~/.graft/bin` to your `PATH`:
+Then add graft's bin directory to your PATH:
 
 ```bash
+# Add to your shell profile (.bashrc, .zshrc, etc.)
 export PATH="$HOME/.graft/bin:$PATH"
 ```
+
+> The crate is `rectifier` — current only flows forward, from upstream to you.
 
 ## Usage
 
 ```bash
-# Install the latest release
-graft org/repo
-
-# Explicit install subcommand
-graft install org/repo
-
-# List installed packages
-graft list
-
-# Remove a package
-graft remove org/repo
+graft org/repo                       # install latest release
+graft install org/repo               # same thing, explicit
+graft list                           # show installed packages
+graft remove org/repo                # uninstall
+graft --install-deps org/repo        # also install missing system libraries
 ```
 
 ## How it works
 
-1. **Pre-built binaries (fast path):** graft checks the latest GitHub Release for assets matching your OS and architecture. It handles `.tar.gz`, `.zip`, and bare binaries.
+graft has two paths, tried in order:
 
-2. **Source builds (fallback):** If no matching binary is found, graft downloads the source tarball for the tag and auto-detects the build system:
-   - `Cargo.toml` → `cargo build --release`
-   - `meson.build` → `meson setup` / `meson compile` / `meson install`
-   - `CMakeLists.txt` → `cmake` configure and build
-   - `Makefile` → `make`
+**1. Pre-built binary (fast path)**
+
+Checks the latest GitHub Release for assets matching your OS and architecture. Handles `.tar.gz`, `.zip`, and bare binaries. This is the common case for Rust/Go/C++ tools that ship release artifacts.
+
+**2. Build from source (fallback)**
+
+Downloads the source tarball for the tagged release and auto-detects the build system:
+
+| File | Build system |
+|------|-------------|
+| `Cargo.toml` | `cargo build --release` |
+| `meson.build` | meson setup / compile / install |
+| `CMakeLists.txt` | cmake configure and build |
+| `Makefile` | make |
+
+For Python projects, graft detects `requirements.txt` and installs dependencies into a shared virtual environment at `~/.graft/python/` (created with `--system-site-packages` so system bindings like GTK/GStreamer remain accessible).
 
 ## Philosophy
 
-Why yet another package manager? Because we do something insane: **trust maintainers**.
+Why yet another package manager?
 
-If a maintainer tags a release and uploads a binary, we install it. If they tag a release with source only, we build it. No recipes, no formulas, no maintainer-separate-from-upstream. The maintainer *is* the packager.
+Most package managers insert a layer between upstream and the user: a recipe, a formula, a PKGBUILD. Someone other than the maintainer has to write and maintain it, and it lags behind releases, or dies when that person moves on.
 
-This won't work for everything. Complex projects with system dependencies (GTK apps, things that need specific libraries) will fail at build time — and that's an honest failure, not a packaging abstraction hiding the problem. But graft will tell you exactly what's missing and how to install it.
+graft skips that layer. **The maintainer is the packager.** If they tag a release and upload a binary, we install it. If they tag a release with source only, we build it. The GitHub release *is* the package.
+
+This means:
+
+- **New releases are available immediately.** No waiting for a downstream packager to update a recipe.
+- **Abandoned formulas can't block you.** There's nothing to abandon — the source of truth is the repo itself.
+- **It won't work for everything.** A complex GTK app with 15 system dependencies will fail at build time. But that's an honest failure, not a packaging abstraction hiding the problem.
 
 ## System dependencies
 
-When a source build fails because of missing system libraries, graft parses the build output and tells you what you need:
+When a source build fails because of missing libraries, graft parses the error and resolves the dependency to your system's package manager:
 
 ```
 [error] Build failed due to missing system libraries:
   - libadwaita-1
 
 [hint] Install them with:
-  emerge --ask gui-libs/libadwaita
+  sudo emerge --ask gui-libs/libadwaita
 
 [hint] Re-run with --install-deps to have graft install them for you.
 ```
 
-graft auto-detects your system package manager (portage, apt, dnf, pacman, zypper, apk) and resolves pkg-config names to real package names.
+Supported package managers: portage (Gentoo), apt (Debian/Ubuntu), dnf (Fedora), pacman (Arch), zypper (openSUSE), apk (Alpine).
 
-Pass `--install-deps` to let graft install the missing libraries and retry the build automatically:
+With `--install-deps`, graft installs the missing libraries and retries the build automatically, looping until everything resolves.
 
-```bash
-graft --install-deps geigi/cozy
-```
+## Python projects
+
+Python projects that build with meson (like [Cozy](https://github.com/geigi/cozy)) get special handling:
+
+- A shared venv at `~/.graft/python/` with `--system-site-packages`
+- PyPI dependencies installed via `uv` (or pip) into the venv
+- Meson configured with the venv as its prefix and Python
+- A wrapper script in `~/.graft/bin/` that runs the app through the venv's interpreter
+
+This means Python apps have access to both their PyPI dependencies and system-level bindings (gi, cairo, GStreamer) without fighting PEP 668 or polluting your system Python.
 
 ## Platform support
 
 - Linux (x86_64, aarch64)
 - macOS (x86_64, aarch64)
-- Windows (x86_64) — binary installs only, source builds are Linux/macOS for now
+- Windows (x86_64) — pre-built binaries only
 
 ## State
 
-graft stores everything under `~/.graft/`:
+Everything lives under `~/.graft/`:
 
-- `bin/` — installed binaries
-- `manifests/` — JSON manifests tracking what's installed, from where, and which version
+```
+~/.graft/
+  bin/           installed binaries and wrapper scripts
+  manifests/     JSON metadata (what's installed, from where, which version)
+  python/        shared Python venv (created on first Python package install)
+```
 
 ## License
 
