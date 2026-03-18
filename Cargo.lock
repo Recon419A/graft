@@ -1190,10 +1190,12 @@ dependencies = [
  "clap",
  "dirs",
  "flate2",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "tar",
+ "tempfile",
  "zip",
 ]
 

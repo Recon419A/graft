@@ -14,10 +14,16 @@ pub struct Asset {
     pub browser_download_url: String,
 }
 
-pub fn latest_release(owner: &str, repo: &str) -> Result<Release, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+#[derive(Debug, Deserialize)]
+struct Tag {
+    name: String,
+}
 
+pub fn latest_release(owner: &str, repo: &str) -> Result<Release, String> {
     let client = reqwest::blocking::Client::new();
+
+    // Try the releases API first.
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
     let resp = client
         .get(&url)
         .header("User-Agent", "graft-pm")
@@ -25,20 +31,37 @@ pub fn latest_release(owner: &str, repo: &str) -> Result<Release, String> {
         .send()
         .map_err(|e| format!("Failed to fetch release: {e}"))?;
 
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(format!("No releases found for {owner}/{repo}"));
+    if resp.status().is_success() {
+        return resp
+            .json::<Release>()
+            .map_err(|e| format!("Failed to parse release JSON: {e}"));
     }
+
+    // Fall back to tags API — the repo may have tags but no formal releases.
+    let tags_url = format!("https://api.github.com/repos/{owner}/{repo}/tags?per_page=1");
+    let resp = client
+        .get(&tags_url)
+        .header("User-Agent", "graft-pm")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|e| format!("Failed to fetch tags: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!(
-            "GitHub API error: {} {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        ));
+        return Err(format!("No releases or tags found for {owner}/{repo}"));
     }
 
-    resp.json::<Release>()
-        .map_err(|e| format!("Failed to parse release JSON: {e}"))
+    let tags: Vec<Tag> = resp
+        .json()
+        .map_err(|e| format!("Failed to parse tags JSON: {e}"))?;
+
+    if let Some(tag) = tags.first() {
+        Ok(Release {
+            tag_name: tag.name.clone(),
+            assets: Vec::new(),
+        })
+    } else {
+        Err(format!("No releases or tags found for {owner}/{repo}"))
+    }
 }
 
 pub fn pick_asset<'a>(release: &'a Release, target: &Target) -> Result<&'a Asset, String> {
