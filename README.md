@@ -118,4 +118,4 @@ Everything lives under `~/.graft/`:
 
 ## License
 
-MIT
+MIT or Apache-2.0, at your option.
