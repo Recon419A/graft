@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub fn ensure_python_venv() -> Result<PathBuf, String> {
 
 pub fn install_python_wrapper(
     script_name: &str,
-    venv_path: &PathBuf,
+    venv_path: &Path,
 ) -> Result<(), String> {
     let bin_dir = bin_dir()?;
     let wrapper_path = bin_dir.join(script_name);
@@ -95,7 +95,7 @@ pub fn install(repo: &str, asset_name: &str, data: &[u8]) -> Result<(), String> 
     }
 }
 
-fn install_from_tar_gz(repo: &str, data: &[u8], bin_dir: &PathBuf) -> Result<(), String> {
+fn install_from_tar_gz(repo: &str, data: &[u8], bin_dir: &Path) -> Result<(), String> {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(data));
     let mut archive = tar::Archive::new(decoder);
 
@@ -155,7 +155,7 @@ fn install_from_tar_gz(repo: &str, data: &[u8], bin_dir: &PathBuf) -> Result<(),
     Ok(())
 }
 
-fn install_from_zip(repo: &str, data: &[u8], bin_dir: &PathBuf) -> Result<(), String> {
+fn install_from_zip(repo: &str, data: &[u8], bin_dir: &Path) -> Result<(), String> {
     let cursor = Cursor::new(data);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to read zip: {e}"))?;
@@ -211,7 +211,7 @@ fn install_from_zip(repo: &str, data: &[u8], bin_dir: &PathBuf) -> Result<(), St
     Ok(())
 }
 
-fn install_bare_binary(repo: &str, data: &[u8], bin_dir: &PathBuf) -> Result<(), String> {
+fn install_bare_binary(repo: &str, data: &[u8], bin_dir: &Path) -> Result<(), String> {
     let dest = bin_dir.join(repo);
     fs::write(&dest, data).map_err(|e| format!("Failed to write binary: {e}"))?;
     fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))
@@ -270,12 +270,11 @@ pub fn uninstall(owner: &str, repo: &str) -> Result<(), String> {
         }
 
         // Clean up Python modules from the shared venv if applicable.
-        if manifest.python_env.unwrap_or(false) {
-            if let Some(modules) = &manifest.python_modules {
-                if let Ok(venv_dir) = python_venv_dir() {
-                    cleanup_python_modules(&venv_dir, modules);
-                }
-            }
+        if manifest.python_env.unwrap_or(false)
+            && let Some(modules) = &manifest.python_modules
+            && let Ok(venv_dir) = python_venv_dir()
+        {
+            cleanup_python_modules(&venv_dir, modules);
         }
 
         fs::remove_file(&manifest_path)
@@ -293,7 +292,7 @@ pub fn uninstall(owner: &str, repo: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cleanup_python_modules(venv_dir: &PathBuf, modules: &[String]) {
+fn cleanup_python_modules(venv_dir: &Path, modules: &[String]) {
     // Find the site-packages directory inside the venv.
     let lib_dir = venv_dir.join("lib");
     if !lib_dir.exists() {

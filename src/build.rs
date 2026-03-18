@@ -228,24 +228,24 @@ fn parse_missing_deps(output: &str) -> Vec<String> {
 
     for line in output.lines() {
         // Meson: Dependency "libadwaita-1" not found
-        if let Some(rest) = line.strip_prefix("meson.build:") {
-            if rest.contains("not found") {
-                if let Some(dep) = extract_quoted(rest) {
-                    deps.push(dep);
-                }
-            }
+        if let Some(rest) = line.strip_prefix("meson.build:")
+            && rest.contains("not found")
+            && let Some(dep) = extract_quoted(rest)
+        {
+            deps.push(dep);
         }
         // Also match the ERROR: line form
-        if line.contains("ERROR: Dependency") && line.contains("not found") {
-            if let Some(dep) = extract_quoted(line) {
-                deps.push(dep);
-            }
+        if line.contains("ERROR: Dependency")
+            && line.contains("not found")
+            && let Some(dep) = extract_quoted(line)
+        {
+            deps.push(dep);
         }
         // CMake: Could not find a package configuration file provided by "..."
-        if line.contains("Could not find a package configuration file provided by") {
-            if let Some(dep) = extract_quoted(line) {
-                deps.push(dep);
-            }
+        if line.contains("Could not find a package configuration file provided by")
+            && let Some(dep) = extract_quoted(line)
+        {
+            deps.push(dep);
         }
         // CMake: -- Could NOT find PkgName
         if line.contains("Could NOT find") {
@@ -256,12 +256,13 @@ fn parse_missing_deps(output: &str) -> Vec<String> {
             }
         }
         // pkg-config: Package 'foo' not found
-        if line.contains("Package '") && line.contains("' not found") {
-            if let Some(start) = line.find("Package '") {
-                let rest = &line[start + 9..];
-                if let Some(end) = rest.find('\'') {
-                    deps.push(rest[..end].to_string());
-                }
+        if line.contains("Package '")
+            && line.contains("' not found")
+            && let Some(start) = line.find("Package '")
+        {
+            let rest = &line[start + 9..];
+            if let Some(end) = rest.find('\'') {
+                deps.push(rest[..end].to_string());
             }
         }
     }

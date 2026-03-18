@@ -96,17 +96,16 @@ fn find_provider_portage(pkg_config_name: &str) -> Option<String> {
     if let Ok(output) = Command::new("equery")
         .args(["belongs", "-e", &pc_file])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().next() {
-                let pkg = line.trim();
-                if !pkg.is_empty() {
-                    if let Some(cat_name) = strip_portage_version(pkg) {
-                        return Some(cat_name);
-                    }
-                    return Some(pkg.to_string());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let pkg = line.trim();
+            if !pkg.is_empty() {
+                if let Some(cat_name) = strip_portage_version(pkg) {
+                    return Some(cat_name);
                 }
+                return Some(pkg.to_string());
             }
         }
     }
@@ -115,14 +114,13 @@ fn find_provider_portage(pkg_config_name: &str) -> Option<String> {
     if let Ok(output) = Command::new("qfile")
         .args(["-qC", &pc_file])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().next() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
     }
@@ -205,15 +203,14 @@ fn find_provider_apt(pkg_config_name: &str) -> Option<String> {
     if let Ok(output) = Command::new("apt-file")
         .args(["search", &pc_file])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Output: "libadwaita-1-dev: /usr/lib/x86_64-linux-gnu/pkgconfig/libadwaita-1.pc"
-            if let Some(line) = stdout.lines().next() {
-                if let Some(pkg) = line.split(':').next() {
-                    return Some(pkg.trim().to_string());
-                }
-            }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Output: "libadwaita-1-dev: /usr/lib/x86_64-linux-gnu/pkgconfig/libadwaita-1.pc"
+        if let Some(line) = stdout.lines().next()
+            && let Some(pkg) = line.split(':').next()
+        {
+            return Some(pkg.trim().to_string());
         }
     }
 
@@ -226,20 +223,19 @@ fn find_provider_dnf(pkg_config_name: &str) -> Option<String> {
     if let Ok(output) = Command::new("dnf")
         .args(["provides", &pc_pattern])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Output lines like: "libadwaita-devel-1.4.0-1.fc39.x86_64 : ..."
-            for line in stdout.lines() {
-                if line.contains("-devel") {
-                    if let Some(pkg) = line.split_whitespace().next() {
-                        // Strip the version/arch suffix.
-                        if let Some(name) = pkg.rsplit_once('-') {
-                            return Some(name.0.to_string());
-                        }
-                        return Some(pkg.to_string());
-                    }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Output lines like: "libadwaita-devel-1.4.0-1.fc39.x86_64 : ..."
+        for line in stdout.lines() {
+            if line.contains("-devel")
+                && let Some(pkg) = line.split_whitespace().next()
+            {
+                // Strip the version/arch suffix.
+                if let Some(name) = pkg.rsplit_once('-') {
+                    return Some(name.0.to_string());
                 }
+                return Some(pkg.to_string());
             }
         }
     }
@@ -252,16 +248,15 @@ fn find_provider_pacman(pkg_config_name: &str) -> Option<String> {
     if let Ok(output) = Command::new("pkgfile")
         .args(["-s", &pc_pattern])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().next() {
-                // pkgfile output: "extra/libadwaita"
-                if let Some(pkg) = line.split('/').nth(1) {
-                    return Some(pkg.trim().to_string());
-                }
-                return Some(line.trim().to_string());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            // pkgfile output: "extra/libadwaita"
+            if let Some(pkg) = line.split('/').nth(1) {
+                return Some(pkg.trim().to_string());
             }
+            return Some(line.trim().to_string());
         }
     }
 
